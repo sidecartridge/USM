@@ -645,11 +645,16 @@ int main(int argc, char **argv)
             }
             else
             {
-                printf("      + %s: would grow (%.0f%%), shipping uncompressed\n",
-                       s_filename,
-                       rc == 0
-                         ? (double)comp_len / (double)file_size * 100.0
-                         : 200.0);
+                // Report the *entry* footprint ratio rather than the data
+                // ratio. For tiny PRGs the data may shrink (e.g. 88%) but
+                // the larger compressed stub still pushes the total entry
+                // over the uncompressed baseline; the entry ratio captures
+                // both stub overhead and data growth in one number.
+                double entry_ratio = rc == 0
+                    ? (double)comp_footprint / (double)uncomp_footprint * 100.0
+                    : 200.0;
+                printf("      + %s: no savings (%.0f%% entry), shipping uncompressed\n",
+                       s_filename, entry_ratio);
             }
         }
 
