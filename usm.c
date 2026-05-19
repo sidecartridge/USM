@@ -216,6 +216,19 @@ int main(int argc, char **argv)
         long file_size = ftell(f);
         fseek(f, 0, SEEK_SET);
 
+        if (file_size < 0)
+        {
+            fclose(f);
+            printf("Could not determine size of %s - exiting\n", *argv);
+            return -1;
+        }
+        if ((size_t)file_size < sizeof(PRG_HEADER))
+        {
+            fclose(f);
+            printf("File %s is too small to be a PRG (%ld bytes, need at least %zu) - exiting\n",
+                   *argv, file_size, sizeof(PRG_HEADER));
+            return -1;
+        }
         if (file_size > 128 * 1024)
         {
             // Without any further checks, this will not fit. RIP
@@ -224,11 +237,12 @@ int main(int argc, char **argv)
             return -1;
         }
 
-        size_t ret = fread(prg_temp_buf, file_size, 1, f);   // TODO check errors etc
+        size_t ret = fread(prg_temp_buf, file_size, 1, f);
         fclose(f);
         if (!ret)
         {
-            printf("Failed to read file %s - exiting", *argv);
+            printf("Failed to read file %s - exiting\n", *argv);
+            return -1;
         }
 
         uint32_t prg_header_size = sizeof(PRG_HEADER);
@@ -250,7 +264,6 @@ int main(int argc, char **argv)
         }
         if (program_size > 128 * 1024 - cart_current_offset - entry_header_size)
         {
-            fclose(f);
             printf("File %s will not fit in image - exiting\n", *argv);
             return -1;
         }
