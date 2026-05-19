@@ -255,18 +255,6 @@ int main(int argc, char **argv)
             return -1;
         }
 
-        program_size = (BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + 1) & 0xfffffffe; // align to 2 bytes
-
-        uint32_t entry_header_size = 0;
-        if (!diagnostic)
-        {
-            entry_header_size = sizeof(CA_HEADER);
-        }
-        if (program_size > 128 * 1024 - cart_current_offset - entry_header_size)
-        {
-            printf("File %s will not fit in image - exiting\n", *argv);
-            return -1;
-        }
         char *s_filename = *argv;
 
         argv++;
@@ -300,17 +288,35 @@ int main(int argc, char **argv)
             }
         }
 
+        program_size = (BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + 1) & 0xfffffffe; // align to 2 bytes
+
+        // Per-program footprint in the cart: CA_HEADER (if not diagnostic) plus
+        // the bytes we actually write -- stub + verbatim PRG in default mode,
+        // TEXT+DATA only in classic mode. Drives both the overflow check and
+        // CA_NEXT so the chain actually points at the next CA_HEADER.
+        uint32_t entry_header_size = diagnostic ? 0 : (uint32_t)sizeof(CA_HEADER);
+        uint32_t payload_in_cart = classic_way_of_adding_programs_to_rom
+            ? program_size
+            : (uint32_t)sizeof(prg_loader) + (uint32_t)file_size;
+        uint32_t entry_total_size = entry_header_size + payload_in_cart;
+
+        if (entry_total_size > (uint32_t)(128 * 1024) - cart_current_offset)
+        {
+            printf("File %s will not fit in image - exiting\n", s_filename);
+            return -1;
+        }
+
         // Write header
         if (!diagnostic)
         {
             CA_HEADER *h = (CA_HEADER *)&cart_start[cart_current_offset];
             last_ca_next = &h->CA_NEXT;
-            h->CA_NEXT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER) + program_size);
+            h->CA_NEXT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + entry_total_size);
             h->CA_INIT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER) + init_current_file);
             h->CA_RUN = BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER));
             h->CA_TIME = 0; //TODO figure out from file info (if we really care)
             h->CA_DATE = 0; //TODO figure out from file info (if we really care)
-            h->CA_SIZE = BYTESWAP_LONG(program_size);
+            h->CA_SIZE = BYTESWAP_LONG(payload_in_cart);
             memset(h->CA_FILENAME, 0, 14);
             char *d_filename = h->CA_FILENAME;
             for (i = 0; i < 8; i++)
@@ -389,6 +395,8 @@ int main(int argc, char **argv)
                     offset = *reloc++;
                 }
             }
+
+            cart_current_offset += program_size;
         }
         else
         {
@@ -408,9 +416,9 @@ int main(int argc, char **argv)
             cart_current_offset += sizeof(prg_loader);
 
             memcpy(&cart_start[cart_current_offset], prg_temp_buf, file_size);
+            cart_current_offset += file_size;
         }
 
-        cart_current_offset += file_size;
         number_of_programs_processed++;
 
         if (diagnostic && argc)
