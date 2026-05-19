@@ -51,6 +51,6 @@ fi
 echo "==> Booting $rom in $hatari_bin"
 exec "$hatari_bin" \
     --cartridge "$rom" \
-    --fast-boot true \
-    --natfeats true \
+#    --fast-boot true \
+#    --natfeats true \
     "$@"

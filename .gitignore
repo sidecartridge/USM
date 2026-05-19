@@ -16,3 +16,10 @@
 
 # Local test input binaries (PRG/TOS) — redistribution rights vary.
 /tests/binaries/*
+
+# Reference carts used for format analysis only; redistribution rights vary.
+/*.STC
+/*.stc
+
+# Experimental classic-mode build script — kept locally, not shipped.
+/tests/build-classic-roms.sh
