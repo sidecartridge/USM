@@ -256,6 +256,7 @@ int main(int argc, char **argv)
         }
 
         char *s_filename = *argv;
+        char *file_path = s_filename; // s_filename is consumed by the 8.3 loop below; keep an unmutated copy for late error messages.
 
         argv++;
         argc--;
@@ -367,10 +368,20 @@ int main(int argc, char **argv)
             {
             uint32_t program_start_address = 0xfa0000 + cart_current_offset;
                 unsigned char *current_relocation = &cart_start[cart_current_offset];
-                unsigned char *reloc = &prg_temp_buf[prg_header_size + BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + BYTESWAP_LONG(ph->PRG_ssize)]; // TODO: Sanity check values
+                unsigned char *prog_end = current_relocation + program_size;
+                unsigned char *reloc = &prg_temp_buf[prg_header_size + BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + BYTESWAP_LONG(ph->PRG_ssize)];
+                unsigned char *reloc_end = (unsigned char *)&prg_temp_buf[file_size];
+                if (reloc + 4 > reloc_end)
+                {
+                    printf("Relocation table in %s extends past end of file - exiting\n", file_path);
+                    return -1;
+                }
             uint32_t offset = BYTESWAP_LONG(*(uint32_t *)reloc);
                 reloc += 4;
-                for (;;)
+                // First LONG of 0 here is the PRG-spec alt encoding for "no fixups";
+                // skip the walker entirely in that case (the old `for(;;)` body would
+                // have fixed up offset 0 -- the first bytes of TEXT -- by mistake).
+                while (offset != 0)
                 {
                     if (offset == 1)
                     {
@@ -379,6 +390,11 @@ int main(int argc, char **argv)
                     else
                     {
                         current_relocation += offset;
+                        if (current_relocation + 4 > prog_end)
+                        {
+                            printf("Relocation in %s points past end of program - exiting\n", file_path);
+                            return -1;
+                        }
                     uint32_t off = BYTESWAP_LONG(*(uint32_t *)current_relocation);
                         if (off < program_size)
                         {
@@ -390,6 +406,11 @@ int main(int argc, char **argv)
                             // It's BSS area, point it to the hardcoded BSS address
                             *(uint32_t *)current_relocation = BYTESWAP_LONG(off - program_size + bss_current_file);
                         }
+                    }
+                    if (reloc >= reloc_end)
+                    {
+                        printf("Relocation table in %s missing terminator - exiting\n", file_path);
+                        return -1;
                     }
                     if (!*reloc) break;
                     offset = *reloc++;
