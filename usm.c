@@ -258,6 +258,18 @@ int main(int argc, char **argv)
         char *s_filename = *argv;
         char *file_path = s_filename; // s_filename is consumed by the 8.3 loop below; keep an unmutated copy for late error messages.
 
+        // CA_FILENAME is 8.3 GEMDOS; strip any directory prefix from argv so a
+        // path like "tests/binaries/MONST2.PRG" lands as "MONST2.PRG" instead
+        // of the previous "TESTS/BI.PRG" (the 8.3 loop didn't treat '/' or '\\'
+        // as delimiters).
+        for (char *p = file_path; *p; p++)
+        {
+            if (*p == '/' || *p == '\\')
+            {
+                s_filename = p + 1;
+            }
+        }
+
         argv++;
         argc--;
 
