@@ -177,6 +177,11 @@ int main(int argc, char **argv)
         argc--;
     }
 
+    if (argc < 1)
+    {
+        printf("Missing image filename - exiting\n");
+        return -1;
+    }
     char *output_filename = *argv;
     argv++;
     argc--;
@@ -299,6 +304,16 @@ int main(int argc, char **argv)
                 printf("Invalid flag passed '%s' - exiting\n", *argv);
                 return -1;
             }
+        }
+
+        if (diagnostic && !classic_way_of_adding_programs_to_rom)
+        {
+            // Diagnostic carts auto-execute from $FA0004 with no basepage, but
+            // the default-mode stub loader assumes a TOS Pexec entry with the
+            // basepage on the stack -- the combination produces a cart that
+            // crashes immediately on insertion. Force -c when -d is in effect.
+            printf("-d (diagnostic cart) requires -c (classic mode); the default stub loader needs a TOS basepage that diagnostic carts don't provide - exiting\n");
+            return -1;
         }
 
         program_size = (BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + 1) & 0xfffffffe; // align to 2 bytes
