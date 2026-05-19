@@ -6,8 +6,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 
-char cart[1024 * 128];
-char prg_temp_buf[1024 * 128];
+unsigned char cart[1024 * 128];
+unsigned char prg_temp_buf[1024 * 128];
 
 #if defined (_WIN32)
 #pragma pack(2)
@@ -33,7 +33,7 @@ typedef struct
     uint16_t    CA_TIME;            // Standard GEMDOS time stamp.
     uint16_t    CA_DATE;            // Standard GEMDOS date stamp.
     uint32_t    CA_SIZE;            // Size of application in bytes.
-    int8_t      CA_FILENAME[14];    // NULL terminated ASCII filename in standard GEMDOS 8+3 format.
+    char        CA_FILENAME[14];    // NULL terminated ASCII filename in standard GEMDOS 8+3 format.
 } CA_HEADER;
 
 typedef struct
@@ -108,7 +108,7 @@ uint32_t parse_init_parameter(char *p)
 int main(int argc, char **argv)
 {
     int diagnostic = 0;
-    char *cart_start = cart;
+    unsigned char *cart_start = cart;
     int cart_current_offset = 0;
     int steem_cart = 0;
     int i;
@@ -195,11 +195,8 @@ int main(int argc, char **argv)
         *fill++ = '!';
     }
 
-    *(uint32_t *)&cart_start[cart_current_offset] = BYTESWAP_LONG(cart_magic);
-    if (diagnostic)
-    {
-        *(uint32_t *)&cart_start[cart_current_offset] = BYTESWAP_LONG(diagnostic_magic);
-    }
+    uint32_t magic_at_zero = diagnostic ? diagnostic_magic : cart_magic;
+    *(uint32_t *)&cart_start[cart_current_offset] = BYTESWAP_LONG(magic_at_zero);
     cart_current_offset += 4;
 
     uint32_t *last_ca_next = 0; // It had better be initialised when we exit the loop below
@@ -497,14 +494,20 @@ int main(int argc, char **argv)
         printf("Could not create image file %s  - exiting\n", output_filename);
         return -1;
     }
+    int write_ok = 1;
     if (steem_cart)
     {
         // Write an extra 0.l at the start of the file
         steem_cart = 0;
-        fwrite(&steem_cart, 4, 1, f);
+        if (fwrite(&steem_cart, 4, 1, f) != 1) write_ok = 0;
     }
-    fwrite(cart_start, 128 * 1024, 1, f);
-    fclose(f);
+    if (write_ok && fwrite(cart_start, 128 * 1024, 1, f) != 1) write_ok = 0;
+    if (fclose(f) != 0) write_ok = 0;
+    if (!write_ok)
+    {
+        printf("Failed writing image file %s - exiting\n", output_filename);
+        return -1;
+    }
 
     return 0;
 }
