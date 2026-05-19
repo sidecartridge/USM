@@ -2,3 +2,17 @@
 /x64/*
 
 /.history/*
+/.claude/
+
+# Compiled binary.
+/usm
+
+# Private project planning (Epics / Stories / Tasks, design notes).
+# Never reference contents in commits, PRs, or source comments.
+/docs/
+
+# Generated test cart artifacts.
+/build/
+
+# Local test input binaries (PRG/TOS) — redistribution rights vary.
+/tests/binaries/*
