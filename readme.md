@@ -42,7 +42,6 @@ Caveats
 
 - Only use single file PRG programs. Programs that try to load external files will not work
 - TODO: Some sanity checks are performed, but the program is far from bullet proof
-- TODO: Date and Time are still set to bogus values
 - On BSS, for "old" mode: programs that access the BSS using PC relative code will most likely fail
 
 Building
