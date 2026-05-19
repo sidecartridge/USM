@@ -38,14 +38,14 @@ typedef struct
 
 typedef struct
 {
-    uint8_t     PRG_magic;  // This WORD contains the magic value (0x601A).
+    uint16_t    PRG_magic;  // This WORD contains the magic value (0x601A).
     uint32_t    PRG_tsize;  // This LONG contains the size of the TEXT segment in bytes.
     uint32_t    PRG_dsize;  // This LONG contains the size of the DATA segment in bytes.
     uint32_t    PRG_bsize;  // This LONG contains the size of the BSS segment in bytes.
     uint32_t    PRG_ssize;  // This LONG contains the size of the symbol table in bytes.
     uint32_t    PRG_res1;   // This LONG is unused and is currently reserved.
     uint32_t    PRGFLAGS;   // This LONG contains flags which define certain process characteristics (as defined below).
-    uint8_t     ABSFLAG;    // This WORD flag should be non-zero to indicate that the program has no fixups or 0 to indicate it does.Since some versions of TOS handle files with this value being non-zero incorrectly, it is better to represent a program having no fixups with 0 here and placing a 0 longword as the fixup offset.
+    uint16_t    ABSFLAG;    // This WORD flag should be non-zero to indicate that the program has no fixups or 0 to indicate it does.Since some versions of TOS handle files with this value being non-zero incorrectly, it is better to represent a program having no fixups with 0 here and placing a 0 longword as the fixup offset.
 } PRG_HEADER;
 #if defined(__linux__) || defined(__CYGWIN__) || defined(__MINGW32__) || defined(__APPLE__) || defined (__COSMOCC__)
 #pragma pack(pop)
@@ -234,10 +234,11 @@ int main(int argc, char **argv)
         uint32_t prg_header_size = sizeof(PRG_HEADER);
         uint32_t program_size;
         PRG_HEADER *ph = (PRG_HEADER *)prg_temp_buf;
-        // TODO: sanity checks for values here
-        if (BYTESWAP_WORD(ph->PRG_magic) != 0x601a)
+        uint16_t magic = BYTESWAP_WORD(ph->PRG_magic);
+        if (magic != 0x601a)
         {
-            // TODO
+            printf("File %s is not a PRG (magic 0x%04x, expected 0x601a) - exiting\n", *argv, magic);
+            return -1;
         }
 
         program_size = (BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + 1) & 0xfffffffe; // align to 2 bytes
