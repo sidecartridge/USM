@@ -5,6 +5,16 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <time.h>
+#include <sys/stat.h>
+
+#if defined(_WIN32)
+#define USM_STAT       _stat
+#define usm_stat_t     struct _stat
+#else
+#define USM_STAT       stat
+#define usm_stat_t     struct stat
+#endif
 
 unsigned char cart[1024 * 128];
 unsigned char prg_temp_buf[1024 * 128];
@@ -97,6 +107,39 @@ uint32_t parse_init_parameter(char *p)
     }
 
     return 1 << (24 + (*p - '0'));
+}
+
+// Convert the input file's mtime to GEMDOS time / date words for the CA_HEADER.
+// GEMDOS time = (hours << 11) | (minutes << 5) | (seconds / 2)
+// GEMDOS date = ((year - 1980) << 9) | (month << 5) | day
+// Years are clamped to the GEMDOS-representable range [1980, 2107]. If stat()
+// fails the cart gets 1980-01-01 00:00:00 -- not pretty, but deterministic.
+static void gemdos_time_date_from_file(const char *path,
+                                       uint16_t *out_time,
+                                       uint16_t *out_date)
+{
+    usm_stat_t st;
+    struct tm *tmv;
+    time_t mtime = 0;
+
+    if (USM_STAT(path, &st) == 0)
+    {
+        mtime = st.st_mtime;
+    }
+
+    tmv = localtime(&mtime);
+    int year   = tmv ? tmv->tm_year + 1900 : 1980;
+    int month  = tmv ? tmv->tm_mon + 1     : 1;
+    int day    = tmv ? tmv->tm_mday        : 1;
+    int hour   = tmv ? tmv->tm_hour        : 0;
+    int minute = tmv ? tmv->tm_min         : 0;
+    int second = tmv ? tmv->tm_sec         : 0;
+
+    if (year < 1980) { year = 1980; month = 1; day = 1; hour = 0; minute = 0; second = 0; }
+    if (year > 2107) { year = 2107; }
+
+    *out_time = (uint16_t)((hour << 11) | (minute << 5) | (second / 2));
+    *out_date = (uint16_t)(((year - 1980) << 9) | (month << 5) | day);
 }
 
 int main(int argc, char **argv)
@@ -341,8 +384,10 @@ int main(int argc, char **argv)
                 ? BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER) + init_current_file)
                 : 0;
             h->CA_RUN = BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER));
-            h->CA_TIME = 0; //TODO figure out from file info (if we really care)
-            h->CA_DATE = 0; //TODO figure out from file info (if we really care)
+            uint16_t ca_time_val, ca_date_val;
+            gemdos_time_date_from_file(file_path, &ca_time_val, &ca_date_val);
+            h->CA_TIME = BYTESWAP_WORD(ca_time_val);
+            h->CA_DATE = BYTESWAP_WORD(ca_date_val);
             h->CA_SIZE = BYTESWAP_LONG(payload_in_cart);
             memset(h->CA_FILENAME, 0, 14);
             char *d_filename = h->CA_FILENAME;
