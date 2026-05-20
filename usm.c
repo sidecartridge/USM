@@ -6,8 +6,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 
-char cart[1024 * 128];
-char prg_temp_buf[1024 * 128];
+unsigned char cart[1024 * 128];
+unsigned char prg_temp_buf[1024 * 128];
 
 #if defined (_WIN32)
 #pragma pack(2)
@@ -33,19 +33,19 @@ typedef struct
     uint16_t    CA_TIME;            // Standard GEMDOS time stamp.
     uint16_t    CA_DATE;            // Standard GEMDOS date stamp.
     uint32_t    CA_SIZE;            // Size of application in bytes.
-    int8_t      CA_FILENAME[14];    // NULL terminated ASCII filename in standard GEMDOS 8+3 format.
+    char        CA_FILENAME[14];    // NULL terminated ASCII filename in standard GEMDOS 8+3 format.
 } CA_HEADER;
 
 typedef struct
 {
-    uint8_t     PRG_magic;  // This WORD contains the magic value (0x601A).
+    uint16_t    PRG_magic;  // This WORD contains the magic value (0x601A).
     uint32_t    PRG_tsize;  // This LONG contains the size of the TEXT segment in bytes.
     uint32_t    PRG_dsize;  // This LONG contains the size of the DATA segment in bytes.
     uint32_t    PRG_bsize;  // This LONG contains the size of the BSS segment in bytes.
     uint32_t    PRG_ssize;  // This LONG contains the size of the symbol table in bytes.
     uint32_t    PRG_res1;   // This LONG is unused and is currently reserved.
     uint32_t    PRGFLAGS;   // This LONG contains flags which define certain process characteristics (as defined below).
-    uint8_t     ABSFLAG;    // This WORD flag should be non-zero to indicate that the program has no fixups or 0 to indicate it does.Since some versions of TOS handle files with this value being non-zero incorrectly, it is better to represent a program having no fixups with 0 here and placing a 0 longword as the fixup offset.
+    uint16_t    ABSFLAG;    // This WORD flag should be non-zero to indicate that the program has no fixups or 0 to indicate it does.Since some versions of TOS handle files with this value being non-zero incorrectly, it is better to represent a program having no fixups with 0 here and placing a 0 longword as the fixup offset.
 } PRG_HEADER;
 #if defined(__linux__) || defined(__CYGWIN__) || defined(__MINGW32__) || defined(__APPLE__) || defined (__COSMOCC__)
 #pragma pack(pop)
@@ -108,7 +108,7 @@ uint32_t parse_init_parameter(char *p)
 int main(int argc, char **argv)
 {
     int diagnostic = 0;
-    char *cart_start = cart;
+    unsigned char *cart_start = cart;
     int cart_current_offset = 0;
     int steem_cart = 0;
     int i;
@@ -177,6 +177,11 @@ int main(int argc, char **argv)
         argc--;
     }
 
+    if (argc < 1)
+    {
+        printf("Missing image filename - exiting\n");
+        return -1;
+    }
     char *output_filename = *argv;
     argv++;
     argc--;
@@ -190,11 +195,8 @@ int main(int argc, char **argv)
         *fill++ = '!';
     }
 
-    *(uint32_t *)&cart_start[cart_current_offset] = BYTESWAP_LONG(cart_magic);
-    if (diagnostic)
-    {
-        *(uint32_t *)&cart_start[cart_current_offset] = BYTESWAP_LONG(diagnostic_magic);
-    }
+    uint32_t magic_at_zero = diagnostic ? diagnostic_magic : cart_magic;
+    *(uint32_t *)&cart_start[cart_current_offset] = BYTESWAP_LONG(magic_at_zero);
     cart_current_offset += 4;
 
     uint32_t *last_ca_next = 0; // It had better be initialised when we exit the loop below
@@ -216,6 +218,19 @@ int main(int argc, char **argv)
         long file_size = ftell(f);
         fseek(f, 0, SEEK_SET);
 
+        if (file_size < 0)
+        {
+            fclose(f);
+            printf("Could not determine size of %s - exiting\n", *argv);
+            return -1;
+        }
+        if ((size_t)file_size < sizeof(PRG_HEADER))
+        {
+            fclose(f);
+            printf("File %s is too small to be a PRG (%ld bytes, need at least %zu) - exiting\n",
+                   *argv, file_size, sizeof(PRG_HEADER));
+            return -1;
+        }
         if (file_size > 128 * 1024)
         {
             // Without any further checks, this will not fit. RIP
@@ -224,36 +239,38 @@ int main(int argc, char **argv)
             return -1;
         }
 
-        size_t ret = fread(prg_temp_buf, file_size, 1, f);   // TODO check errors etc
+        size_t ret = fread(prg_temp_buf, file_size, 1, f);
         fclose(f);
         if (!ret)
         {
-            printf("Failed to read file %s - exiting", *argv);
+            printf("Failed to read file %s - exiting\n", *argv);
+            return -1;
         }
 
         uint32_t prg_header_size = sizeof(PRG_HEADER);
         uint32_t program_size;
         PRG_HEADER *ph = (PRG_HEADER *)prg_temp_buf;
-        // TODO: sanity checks for values here
-        if (BYTESWAP_WORD(ph->PRG_magic) != 0x601a)
+        uint16_t magic = BYTESWAP_WORD(ph->PRG_magic);
+        if (magic != 0x601a)
         {
-            // TODO
-        }
-
-        program_size = (BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + 1) & 0xfffffffe; // align to 2 bytes
-
-        uint32_t entry_header_size = 0;
-        if (!diagnostic)
-        {
-            entry_header_size = sizeof(CA_HEADER);
-        }
-        if (program_size > 128 * 1024 - cart_current_offset - entry_header_size)
-        {
-            fclose(f);
-            printf("File %s will not fit in image - exiting\n", *argv);
+            printf("File %s is not a PRG (magic 0x%04x, expected 0x601a) - exiting\n", *argv, magic);
             return -1;
         }
+
         char *s_filename = *argv;
+        char *file_path = s_filename; // s_filename is consumed by the 8.3 loop below; keep an unmutated copy for late error messages.
+
+        // CA_FILENAME is 8.3 GEMDOS; strip any directory prefix from argv so a
+        // path like "tests/binaries/MONST2.PRG" lands as "MONST2.PRG" instead
+        // of the previous "TESTS/BI.PRG" (the 8.3 loop didn't treat '/' or '\\'
+        // as delimiters).
+        for (char *p = file_path; *p; p++)
+        {
+            if (*p == '/' || *p == '\\')
+            {
+                s_filename = p + 1;
+            }
+        }
 
         argv++;
         argc--;
@@ -286,17 +303,45 @@ int main(int argc, char **argv)
             }
         }
 
+        if (diagnostic && !classic_way_of_adding_programs_to_rom)
+        {
+            // Diagnostic carts auto-execute from $FA0004 with no basepage, but
+            // the default-mode stub loader assumes a TOS Pexec entry with the
+            // basepage on the stack -- the combination produces a cart that
+            // crashes immediately on insertion. Force -c when -d is in effect.
+            printf("-d (diagnostic cart) requires -c (classic mode); the default stub loader needs a TOS basepage that diagnostic carts don't provide - exiting\n");
+            return -1;
+        }
+
+        program_size = (BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + 1) & 0xfffffffe; // align to 2 bytes
+
+        // Per-program footprint in the cart: CA_HEADER (if not diagnostic) plus
+        // the bytes we actually write -- stub + verbatim PRG in default mode,
+        // TEXT+DATA only in classic mode. Drives both the overflow check and
+        // CA_NEXT so the chain actually points at the next CA_HEADER.
+        uint32_t entry_header_size = diagnostic ? 0 : (uint32_t)sizeof(CA_HEADER);
+        uint32_t payload_in_cart = classic_way_of_adding_programs_to_rom
+            ? program_size
+            : (uint32_t)sizeof(prg_loader) + (uint32_t)file_size;
+        uint32_t entry_total_size = entry_header_size + payload_in_cart;
+
+        if (entry_total_size > (uint32_t)(128 * 1024) - cart_current_offset)
+        {
+            printf("File %s will not fit in image - exiting\n", s_filename);
+            return -1;
+        }
+
         // Write header
         if (!diagnostic)
         {
             CA_HEADER *h = (CA_HEADER *)&cart_start[cart_current_offset];
             last_ca_next = &h->CA_NEXT;
-            h->CA_NEXT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER) + program_size);
+            h->CA_NEXT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + entry_total_size);
             h->CA_INIT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER) + init_current_file);
             h->CA_RUN = BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER));
             h->CA_TIME = 0; //TODO figure out from file info (if we really care)
             h->CA_DATE = 0; //TODO figure out from file info (if we really care)
-            h->CA_SIZE = BYTESWAP_LONG(program_size);
+            h->CA_SIZE = BYTESWAP_LONG(payload_in_cart);
             memset(h->CA_FILENAME, 0, 14);
             char *d_filename = h->CA_FILENAME;
             for (i = 0; i < 8; i++)
@@ -347,10 +392,20 @@ int main(int argc, char **argv)
             {
             uint32_t program_start_address = 0xfa0000 + cart_current_offset;
                 unsigned char *current_relocation = &cart_start[cart_current_offset];
-                unsigned char *reloc = &prg_temp_buf[prg_header_size + BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + BYTESWAP_LONG(ph->PRG_ssize)]; // TODO: Sanity check values
+                unsigned char *prog_end = current_relocation + program_size;
+                unsigned char *reloc = &prg_temp_buf[prg_header_size + BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + BYTESWAP_LONG(ph->PRG_ssize)];
+                unsigned char *reloc_end = (unsigned char *)&prg_temp_buf[file_size];
+                if (reloc + 4 > reloc_end)
+                {
+                    printf("Relocation table in %s extends past end of file - exiting\n", file_path);
+                    return -1;
+                }
             uint32_t offset = BYTESWAP_LONG(*(uint32_t *)reloc);
                 reloc += 4;
-                for (;;)
+                // First LONG of 0 here is the PRG-spec alt encoding for "no fixups";
+                // skip the walker entirely in that case (the old `for(;;)` body would
+                // have fixed up offset 0 -- the first bytes of TEXT -- by mistake).
+                while (offset != 0)
                 {
                     if (offset == 1)
                     {
@@ -359,6 +414,11 @@ int main(int argc, char **argv)
                     else
                     {
                         current_relocation += offset;
+                        if (current_relocation + 4 > prog_end)
+                        {
+                            printf("Relocation in %s points past end of program - exiting\n", file_path);
+                            return -1;
+                        }
                     uint32_t off = BYTESWAP_LONG(*(uint32_t *)current_relocation);
                         if (off < program_size)
                         {
@@ -371,10 +431,17 @@ int main(int argc, char **argv)
                             *(uint32_t *)current_relocation = BYTESWAP_LONG(off - program_size + bss_current_file);
                         }
                     }
+                    if (reloc >= reloc_end)
+                    {
+                        printf("Relocation table in %s missing terminator - exiting\n", file_path);
+                        return -1;
+                    }
                     if (!*reloc) break;
                     offset = *reloc++;
                 }
             }
+
+            cart_current_offset += program_size;
         }
         else
         {
@@ -394,9 +461,9 @@ int main(int argc, char **argv)
             cart_current_offset += sizeof(prg_loader);
 
             memcpy(&cart_start[cart_current_offset], prg_temp_buf, file_size);
+            cart_current_offset += file_size;
         }
 
-        cart_current_offset += file_size;
         number_of_programs_processed++;
 
         if (diagnostic && argc)
@@ -427,14 +494,20 @@ int main(int argc, char **argv)
         printf("Could not create image file %s  - exiting\n", output_filename);
         return -1;
     }
+    int write_ok = 1;
     if (steem_cart)
     {
         // Write an extra 0.l at the start of the file
         steem_cart = 0;
-        fwrite(&steem_cart, 4, 1, f);
+        if (fwrite(&steem_cart, 4, 1, f) != 1) write_ok = 0;
     }
-    fwrite(cart_start, 128 * 1024, 1, f);
-    fclose(f);
+    if (write_ok && fwrite(cart_start, 128 * 1024, 1, f) != 1) write_ok = 0;
+    if (fclose(f) != 0) write_ok = 0;
+    if (!write_ok)
+    {
+        printf("Failed writing image file %s - exiting\n", output_filename);
+        return -1;
+    }
 
     return 0;
 }
