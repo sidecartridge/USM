@@ -53,6 +53,36 @@ check_size() {
     fi
 }
 
+# Walks the cart's CA_NEXT chain and asserts every CA_HEADER lands on an
+# even cart offset. TOS reads the chain with long-word accesses; an odd
+# CA_HEADER pointer triggers a 68000 Address Error and crashes the
+# machine with a line of bombs before GEM is up.
+check_alignment() {
+    path=$1
+    python3 - "$path" <<'PY'
+import struct, sys
+data = open(sys.argv[1], 'rb').read()
+# STEem prefix: 4 leading zero bytes before the actual cart payload.
+base = 4 if data[:4] == b'\x00\x00\x00\x00' else 0
+magic_off = base
+magic = data[magic_off:magic_off+4]
+if magic != b'\xab\xcd\xef\x42' and magic != b'\xfa\x52\x23\x5f':
+    sys.exit(0)  # diagnostic / unknown magic - skip
+if magic == b'\xfa\x52\x23\x5f':
+    sys.exit(0)  # diagnostic cart has no CA_HEADER chain
+o = magic_off + 4
+i = 0
+while o and o < len(data):
+    cart_off = o - base
+    if cart_off & 1:
+        print(f"FAIL: {sys.argv[1]} CA_HEADER {i} at odd cart offset {cart_off} (${0xfa0000 + cart_off:06x})", file=sys.stderr)
+        sys.exit(1)
+    ca_next = struct.unpack('>I', data[o:o+4])[0]
+    o = (ca_next - 0xfa0000 + base) if ca_next else 0
+    i += 1
+PY
+}
+
 for src in $fixtures; do
     name=$(basename "$src")
     plain="build/${name%.*}_test.ROM"
@@ -62,10 +92,19 @@ for src in $fixtures; do
     ./usm -z     "$compd" "$src" || status=1
     check_size 131072 "$plain"   || status=1
     check_size 131072 "$compd"   || status=1
+    check_alignment "$plain"     || status=1
+    check_alignment "$compd"     || status=1
 done
 
 # Clean up _test* artefacts so they don't pollute build/ between runs.
 rm -f build/*_test.ROM build/*_test_z.ROM
+
+# Synthetic multi-program-cart alignment test - the only test that
+# actively exercises the word-alignment padding path (existing fixtures
+# happen to have even-sized cart payloads through the test paths).
+if [ -x ./tests/run-alignment-synth.sh ]; then
+    ./tests/run-alignment-synth.sh || status=1
+fi
 
 if [ "$status" -eq 0 ]; then
     echo
