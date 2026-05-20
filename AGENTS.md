@@ -7,9 +7,11 @@ This repository contains **USM**, a small host-side command-line tool (one C fil
 ## Project layout
 
 - `usm.c` — the entire tool. Single translation unit, no headers of its own.
-- `prg_loader.s` — 68k assembly for the runtime stub loader used in default (non-`-c`) mode.
+- `prg_loader.s` — 68k assembly for the default-mode runtime stub loader (the uncompressed variant).
 - `prg_loader.bin` — vasm output of `prg_loader.s`. **The byte array `prg_loader[]` inside `usm.c` is a hand-copied snapshot of this file.** They can drift; keep them in sync.
-- `prg_loader_build.bat` — assembles `prg_loader.s` with vasm (`vasm -quiet -Fbin -o prg_loader.bin prg_loader.s`).
+- `prg_loader_compressed.s` — 68k assembly for the LZSS-aware stub used when `-z` is in effect. Shares the same Mshrink + Malloc + basepage skeleton as `prg_loader.s` but replaces the ROM→RAM copy with an inline LZSS-12-4 decompressor.
+- `prg_loader_compressed.bin` — vasm output of the above, embedded as `prg_loader_compressed[]` in `usm.c` under the same sync rule as `prg_loader[]`.
+- `prg_loader_build.bat` — assembles `prg_loader.s` with vasm (`vasm -quiet -Fbin -o prg_loader.bin prg_loader.s`); the compressed stub uses the analogous incantation.
 - `build_mac_linux.sh`, `build_mingw.bat` — host builds (gcc / MinGW gcc).
 - `usm.sln`, `usm.vcxproj`, `usm.vcxproj.filters` — Visual Studio build files (kept in sync with the gcc builds).
 - `Makefile` — only target is `make tag` (reads `version.txt`, tags and pushes).
@@ -21,7 +23,7 @@ This repository contains **USM**, a small host-side command-line tool (one C fil
 ## Build prerequisites
 
 - A C compiler: `gcc` (Linux/macOS) or MinGW `gcc` (Windows). MSVC via the `.sln` is also supported.
-- **vasm** (Motorola syntax) — only needed if you edit `prg_loader.s`. Not required for routine `usm.c` work.
+- **vasm** (Motorola syntax) — only needed if you edit `prg_loader.s` or `prg_loader_compressed.s`. Not required for routine `usm.c` work. The repo's existing `stcmd` Dockerised toolchain ships vasm; the typical invocation is `STCMD_NO_TTY=1 STCMD_QUIET=1 stcmd vasm -quiet -Fbin -o prg_loader{,_compressed}.bin prg_loader{,_compressed}.s`.
 - No package manager, no submodules, no SDK.
 
 ---

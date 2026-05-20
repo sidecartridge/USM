@@ -18,20 +18,46 @@ USM is a command-line tool that packages Atari ST `.PRG` executables into 128 KB
 
 There are no tests, no linter config, and no package manager — this is plain ANSI-ish C with `gcc`/MSVC.
 
-## Architecture: two cart layouts, one tool
+## Architecture: three cart layouts, one tool
 
-`usm.c` writes one of two on-disk layouts depending on whether `-c` (classic) is passed. Understanding the difference is the bulk of the mental model:
+`usm.c` writes one of three on-disk layouts per program, depending on the flags. Understanding the differences is the bulk of the mental model:
 
 ### Default mode — stub-loader wrapping (recommended)
-For each input `.PRG`, the tool writes a small 68k stub (`prg_loader`, an embedded byte array at `usm.c:62`) followed by the **unmodified** PRG (header + sections + relocations) into the cart image. At runtime the stub:
-1. Mshrinks the basepage to free RAM,
-2. Copies the original PRG from ROM into RAM,
-3. Pexecs / relocates it in-place so the program runs from RAM as it would from disk.
+For each input `.PRG`, the tool writes a small 68k stub (`prg_loader`, an embedded byte array near the top of `usm.c`) followed by the **unmodified** PRG (header + sections + relocations) into the cart image. At runtime the stub:
+1. Mshrinks the TOS-provided basepage,
+2. `Malloc`s a fresh TPA from the largest free chunk,
+3. Builds a complete Pexec-style basepage from scratch,
+4. Copies the original PRG from ROM into the TPA at `$100(a5)`,
+5. Zero-fills BSS (conditional on the PRGFLAGS fastload bit) and applies PRG relocations,
+6. JMPs to the program entry.
 
-The stub is assembled from `prg_loader.s` using vasm (`prg_loader_build.bat`: `vasm -quiet -Fbin -o prg_loader.bin prg_loader.s`). The resulting bytes are then hand-pasted into the `prg_loader[]` array in `usm.c`. **If you edit `prg_loader.s`, you must rebuild `prg_loader.bin` AND copy its bytes back into `usm.c`** — there is no build-time linkage between the two. The two magic offsets `0x3a` and `0x40` inside the stub (see `usm.c:389-392`) are the slots the C code patches with the payload's start and end ROM addresses; if you change the assembler source, those offsets will likely move and the comment `// TODO un-hardcode this` is your warning.
+The stub uses **PC-relative addressing** (`lea prg_payload(pc), a4`) to locate the appended PRG, so the same stub bytes work for every entry in a multi-program cart with no cart-build-time patching. Assembled from `prg_loader.s` using vasm: `stcmd vasm -quiet -Fbin -o prg_loader.bin prg_loader.s` (the project's `stcmd` dockerised toolchain). The resulting bytes are hand-pasted into the `prg_loader[]` array in `usm.c`. **If you edit `prg_loader.s`, you must rebuild `prg_loader.bin` AND copy its bytes back into `usm.c`** — there is no build-time linkage between the two.
+
+### Default + compressed mode (`-z`)
+Same shape as the default mode, but the PRG payload is LZSS-compressed and the stub variant is `prg_loader_compressed.s` / `prg_loader_compressed[]` (separate ~304-byte stub embedded next to `prg_loader[]`). Per-program cart layout:
+
+```
+[ CA_HEADER 34B ][ prg_loader_compressed bytes ][ uncompressed_size LONG, big-endian ][ compressed payload ]
+```
+
+The compressed stub does the same Mshrink + Malloc + basepage skeleton work, then replaces the ROM→RAM copy phase with an inline LZSS-12-4 decompressor (~80 bytes of 68k). Decompresses straight into the TPA at `$100(a5)` and then runs the same BSS clear / relocation / basepage finalization tail. Because the decompressed image *includes* the 28-byte PRG header (whereas the uncompressed stub skips the header in its copy), the compressed stub's relocator and basepage fill use `lea $100+prg_text(a5),a1` (= `$11C(a5)`) where the uncompressed stub uses `lea $100(a5),a1`. **Both stubs share the same sync rule**: edit `.s`, rebuild `.bin` via `stcmd vasm`, paste bytes into `usm.c`. `usm.c` auto-falls-back to the uncompressed stub for any entry whose compressed footprint isn't actually smaller (always the case for tiny PRGs because of the larger stub, and for already-packed demos because LZSS can't shrink them).
 
 ### Classic mode (`-c`) — in-ROM relocation
 TEXT+DATA are copied into the cart (no PRG header), the program is relocated so TEXT/DATA references resolve to `$fa0000 + offset` (the cart's mapped address) and BSS references resolve to a hardcoded RAM address controlled by `-b` (default `$20000`). This is the older, fragile mode — PC-relative BSS access and programs that load external files won't work. Most real-world PRGs need the default mode.
+
+### LZSS-12-4 stream format (the compressed payload's bitstream)
+
+Sequence of ≤ 9-byte blocks. Each block:
+
+```
+[ flag byte ] [ up to 8 tokens ]
+```
+
+Flag byte's bits, MSB-first, classify the next 8 tokens:
+- bit = 0 → next 1 byte is a literal, copy verbatim.
+- bit = 1 → next 2 bytes are a back-reference, big-endian, packed as `(offset - 1) << 4 | (length - 3)`. Offset range 1..4096 (12 bits). Length range 3..18 (4 bits).
+
+No EOF marker — decoder knows the expected uncompressed size from the LONG before the compressed bytes. The C reference encoder (`lzss_compress`) and host-side decoder (`lzss_decompress`) live in `usm.c` alongside a startup self-test (`lzss_selftest`) that runs on every invocation and a hidden `-T <file>` round-trip debug command. The 68k decompressor inside `prg_loader_compressed.s` is the canonical implementation; the host-side decoder mirrors it exactly.
 
 ### Cart header model
 Cart starts at `$fa0000` on the Atari ST. Non-diagnostic carts begin with a 4-byte magic (`0xABCDEF42`), followed by a chain of `CA_HEADER` records (one per program) — each header points to the next via `CA_NEXT` (absolute ROM address), with the final entry's `CA_NEXT = 0`. `CA_INIT`'s top byte encodes the OS init-time flags configured by `-f` (0/1/3/5/6/7 — see `parse_init_parameter` in `usm.c:97`). `CA_FILENAME` is uppercased 8.3 GEMDOS.
@@ -48,11 +74,11 @@ Atari ST is 68k big-endian; the C code runs on little-endian hosts (and Windows/
 
 ## Things that bite
 
-- `cart[]` and `prg_temp_buf[]` are 128 KB static buffers (`usm.c:9-10`). Input PRGs larger than 128 KB are rejected. There's no streaming.
-- The classic-mode relocation walker uses the standard PRG relocation byte-stream (offset 1 means "skip 254", 0 terminates). If you touch `usm.c:340-377`, keep that contract intact.
-- `ABSFLAG` non-zero means "no fixups"; classic mode skips the relocation pass in that case but does no further sanity checking.
+- `cart[]` and `prg_temp_buf[]` are 128 KB static buffers near the top of `usm.c`; `compress_temp_buf[]` adds a 256 KB scratch buffer used only by `-z`. Input PRGs larger than 128 KB are rejected. There's no streaming.
+- The classic-mode relocation walker uses the standard PRG relocation byte-stream (offset 1 means "skip 254", 0 terminates). Both that walker and the in-stub relocators (uncompressed and compressed) must agree on the contract; don't touch one without re-reading the others.
+- `ABSFLAG` non-zero means "no fixups"; classic mode skips the relocation pass in that case but does no further sanity checking. The stubs honour the same rule by testing `(a0)` is non-zero before walking.
 - The `pragma pack(2)` block guarding `CA_HEADER` and `PRG_HEADER` is platform-conditional — keep both branches (MSVC `_WIN32` uses a non-stack `#pragma pack(2)`, everyone else uses push/pop). Misaligned struct writes here corrupt the ROM silently.
-- Date/time fields in `CA_HEADER` are written as zero — explicit `TODO` in the source.
+- The host-side LZSS encoder/decoder pair lives in `usm.c`. Any change to the bitstream format must be made in **three** places that stay in lock-step: `lzss_compress`, `lzss_decompress`, and the inline 68k decompressor inside `prg_loader_compressed.s`. The startup self-test (`lzss_selftest`) and `-T` debug command catch encoder/decoder divergence within `usm.c`; the 68k decompressor's drift will only show up in Hatari.
 
 ## Planning artifacts
 
@@ -69,9 +95,10 @@ When writing a commit, describe the change in its own terms ("fix CA_NEXT chain 
 
 ## Editing guardrails
 
-- The `prg_loader[]` byte array in `usm.c:62` is **generated output** from `prg_loader.s` via vasm — never hand-edit the bytes. If the stub needs a change, edit `prg_loader.s`, rebuild `prg_loader.bin` (`prg_loader_build.bat`), and copy the bytes back into `usm.c`. Re-check the `0x3a`/`0x40` patch offsets at `usm.c:389-392` after any stub change.
+- The `prg_loader[]` and `prg_loader_compressed[]` byte arrays in `usm.c` are **generated output** from `prg_loader.s` and `prg_loader_compressed.s` via vasm — never hand-edit the bytes. If a stub needs a change, edit the `.s` file, rebuild the `.bin` (`stcmd vasm -quiet -Fbin -o prg_loader{,_compressed}.bin prg_loader{,_compressed}.s`), and copy the bytes back into `usm.c`. Both stubs use PC-relative payload addressing (`lea prg_payload(pc), a4`) so there are **no patch slots to keep in sync** — that part of the build pipeline is gone.
 - Match the existing C style in `usm.c` — there is no `.clang-format` or linter wired up. Keep the same 4-space indent, brace placement, and `#pragma pack` platform guards (MSVC vs. everyone else).
-- Don't refactor the classic-mode relocation walker (`usm.c:340-377`) for style — the byte-stream contract (`1` = skip 254, `0` = terminate) is what the PRG format requires.
+- Don't refactor the classic-mode relocation walker for style — the byte-stream contract (`1` = skip 254, `0` = terminate) is what the PRG format requires.
+- LZSS bitstream changes must update all three implementations in lock-step (`lzss_compress`, `lzss_decompress`, and the inline 68k decompressor in `prg_loader_compressed.s`).
 
 ---
 

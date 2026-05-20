@@ -88,6 +88,41 @@ unsigned char prg_loader[] =
 0x00 ,0x18 ,0x2B ,0x6C ,0x00 ,0x0A ,0x00 ,0x1C ,0x91 ,0xC8 ,0x4E ,0xD1
 };
 
+// LZSS-12-4 compressed-mode stub. Same Mshrink + Malloc + basepage layout
+// as prg_loader[], but the ROM->RAM copy phase is replaced by inline LZSS
+// decompression. Built from prg_loader_compressed.s. The PC-relative
+// `prg_payload` label inside the stub points at a 4-byte big-endian
+// uncompressed_size LONG followed by the compressed bytes; usm.c writes
+// both into the cart immediately after this stub.
+unsigned char prg_loader_compressed[] =
+{
+0x28 ,0x6F ,0x00 ,0x04 ,0x2F ,0x3C ,0x00 ,0x00 ,0x01 ,0x00 ,0x2F ,0x0C ,0x42 ,0x67 ,0x3F ,0x3C,
+0x00 ,0x4A ,0x4E ,0x41 ,0x4F ,0xEF ,0x00 ,0x0C ,0x70 ,0xFF ,0x2F ,0x00 ,0x3F ,0x3C ,0x00 ,0x48,
+0x4E ,0x41 ,0x5C ,0x8F ,0x22 ,0x00 ,0x2F ,0x00 ,0x3F ,0x3C ,0x00 ,0x48 ,0x4E ,0x41 ,0x5C ,0x8F,
+0x28 ,0x40 ,0x34 ,0x3C ,0x00 ,0x3F ,0x42 ,0x9C ,0x51 ,0xCA ,0xFF ,0xFC ,0x2A ,0x40 ,0x2A ,0x80,
+0x2E ,0x40 ,0xDF ,0xC1 ,0x2B ,0x4F ,0x00 ,0x04 ,0x51 ,0x8F ,0x2F ,0x4D ,0x00 ,0x04 ,0x49 ,0xED,
+0x00 ,0x80 ,0x2B ,0x4C ,0x00 ,0x20 ,0x49 ,0xED ,0x00 ,0x30 ,0x2B ,0x4C ,0x00 ,0x2C ,0x49 ,0xFA,
+0x00 ,0xD0 ,0x20 ,0x1C ,0x20 ,0x4C ,0x43 ,0xED ,0x01 ,0x00 ,0x47 ,0xF1 ,0x08 ,0x00 ,0xB3 ,0xCB,
+0x6C ,0x3A ,0x14 ,0x18 ,0x76 ,0x07 ,0xB3 ,0xCB ,0x6C ,0x32 ,0xD4 ,0x02 ,0x65 ,0x08 ,0x12 ,0xD8,
+0x51 ,0xCB ,0xFF ,0xF4 ,0x60 ,0xEC ,0x78 ,0x00 ,0x18 ,0x18 ,0xE1 ,0x4C ,0x18 ,0x18 ,0x3A ,0x04,
+0xE8 ,0x4C ,0x52 ,0x44 ,0x02 ,0x45 ,0x00 ,0x0F ,0x56 ,0x45 ,0x24 ,0x49 ,0x94 ,0xC4 ,0x53 ,0x45,
+0x12 ,0xDA ,0x51 ,0xCD ,0xFF ,0xFC ,0x51 ,0xCB ,0xFF ,0xCE ,0x60 ,0xC6 ,0x49 ,0xED ,0x01 ,0x00,
+0x20 ,0x4C ,0x41 ,0xE8 ,0x00 ,0x1C ,0xD1 ,0xEC ,0x00 ,0x02 ,0xD1 ,0xEC ,0x00 ,0x06 ,0xD1 ,0xEC,
+0x00 ,0x0E ,0x22 ,0x48 ,0x08 ,0x2C ,0x00 ,0x00 ,0x00 ,0x19 ,0x66 ,0x0E ,0x20 ,0x2C ,0x00 ,0x0A,
+0xD0 ,0x89 ,0x32 ,0xFC ,0x00 ,0x00 ,0xB0 ,0x89 ,0x6E ,0xF8 ,0x4A ,0x90 ,0x67 ,0x22 ,0x43 ,0xED,
+0x01 ,0x1C ,0x22 ,0x09 ,0x70 ,0x00 ,0xD3 ,0xD8 ,0xD3 ,0x91 ,0x10 ,0x18 ,0x67 ,0x12 ,0xB0 ,0x3C,
+0x00 ,0x01 ,0x66 ,0x06 ,0x43 ,0xE9 ,0x00 ,0xFE ,0x60 ,0xF0 ,0xD2 ,0xC0 ,0xD3 ,0x91 ,0x60 ,0xEA,
+0x43 ,0xED ,0x01 ,0x1C ,0x22 ,0x09 ,0x2B ,0x41 ,0x00 ,0x08 ,0x20 ,0x2C ,0x00 ,0x02 ,0x2B ,0x40,
+0x00 ,0x0C ,0xD2 ,0x80 ,0x2B ,0x41 ,0x00 ,0x10 ,0x20 ,0x2C ,0x00 ,0x06 ,0x2B ,0x40 ,0x00 ,0x14,
+0xD2 ,0x80 ,0x2B ,0x41 ,0x00 ,0x18 ,0x2B ,0x6C ,0x00 ,0x0A ,0x00 ,0x1C ,0x91 ,0xC8 ,0x4E ,0xD1
+};
+
+// Scratch buffer for LZSS-compressed output during cart-build. Sized so
+// that even a "compressed" output bigger than the input fits without
+// triggering a buffer-overflow error (the auto-fallback in -z mode will
+// then detect that compression didn't help and ship uncompressed).
+unsigned char compress_temp_buf[256 * 1024];
+
 uint32_t parse_bss_parameter(char *p)
 {
     if (!p)
@@ -142,6 +177,178 @@ static void gemdos_time_date_from_file(const char *path,
     *out_date = (uint16_t)(((year - 1980) << 9) | (month << 5) | day);
 }
 
+// LZSS-12-4 compression. See Epic 002 / Story 1 for the format spec.
+//
+// Stream is a sequence of <= 9-byte blocks. Each block is 1 flag byte
+// followed by up to 8 tokens. The flag's bits (MSB-first) classify each
+// token: 0 = literal (1 byte); 1 = back-reference (2 bytes, big-endian,
+// packed as (offset-1) << 4 | (length-3) with offset in 1..4096 and
+// length in 3..18). The decoder is told the expected uncompressed size
+// up front, so no EOF marker is needed in the stream itself.
+//
+// The encoder is greedy longest-match: at each input position scan the
+// preceding 4 KB for the longest run that matches. Naive O(N * window)
+// search; fast enough for the few-hundred-KB inputs USM handles.
+#define LZSS_OFF_BITS    12
+#define LZSS_LEN_BITS    4
+#define LZSS_WIN_SIZE    (1 << LZSS_OFF_BITS)          // 4096
+#define LZSS_MIN_MATCH   3
+#define LZSS_MAX_MATCH   (LZSS_MIN_MATCH + (1 << LZSS_LEN_BITS) - 1)  // 18
+
+static int lzss_compress(const unsigned char *src, size_t srclen,
+                         unsigned char *dst, size_t dstcap,
+                         size_t *out_len)
+{
+    size_t in = 0;
+    size_t out = 0;
+    while (in < srclen)
+    {
+        if (out >= dstcap) return -1;
+        size_t flag_pos = out++;
+        unsigned char flag = 0;
+
+        for (int bit = 0; bit < 8 && in < srclen; bit++)
+        {
+            // Find the longest match in [window_start, in).
+            size_t window_start = (in > LZSS_WIN_SIZE) ? in - LZSS_WIN_SIZE : 0;
+            size_t best_off = 0;
+            size_t best_len = 0;
+            size_t max_l    = LZSS_MAX_MATCH;
+            if (in + max_l > srclen) max_l = srclen - in;
+
+            // Scan latest-first so a tie picks the closest occurrence.
+            for (size_t j = in; j > window_start; )
+            {
+                j--;
+                size_t l = 0;
+                while (l < max_l && src[j + l] == src[in + l]) l++;
+                if (l > best_len)
+                {
+                    best_len = l;
+                    best_off = in - j;
+                    if (best_len == LZSS_MAX_MATCH) break;
+                }
+            }
+
+            if (best_len >= LZSS_MIN_MATCH)
+            {
+                if (out + 2 > dstcap) return -1;
+                uint32_t enc_off = (uint32_t)(best_off - 1);
+                uint32_t enc_len = (uint32_t)(best_len - LZSS_MIN_MATCH);
+                uint32_t word = (enc_off << LZSS_LEN_BITS) | enc_len;
+                dst[out++] = (unsigned char)(word >> 8);
+                dst[out++] = (unsigned char)(word & 0xff);
+                flag |= (unsigned char)(1 << (7 - bit));
+                in += best_len;
+            }
+            else
+            {
+                if (out + 1 > dstcap) return -1;
+                dst[out++] = src[in++];
+            }
+        }
+
+        dst[flag_pos] = flag;
+    }
+
+    *out_len = out;
+    return 0;
+}
+
+// LZSS-12-4 decompression. Mirrors the algorithm the 68k stub will run.
+// Caller passes the expected uncompressed size (`expected_size`); the
+// decoder produces exactly that many output bytes, returning 0 on
+// success or non-zero if input is exhausted / a back-reference points
+// before the start of output.
+static int lzss_decompress(const unsigned char *src, size_t srclen,
+                           unsigned char *dst, size_t expected_size)
+{
+    size_t in = 0;
+    size_t out = 0;
+    while (out < expected_size)
+    {
+        if (in >= srclen) return -1;
+        unsigned char flag = src[in++];
+        for (int bit = 0; bit < 8 && out < expected_size; bit++)
+        {
+            if (flag & (unsigned char)(1 << (7 - bit)))
+            {
+                if (in + 2 > srclen) return -1;
+                uint32_t word = ((uint32_t)src[in] << 8) | src[in + 1];
+                in += 2;
+                size_t off = (word >> LZSS_LEN_BITS) + 1;
+                size_t len = (word & ((1 << LZSS_LEN_BITS) - 1)) + LZSS_MIN_MATCH;
+                if (off > out) return -1;
+                if (out + len > expected_size) return -1;
+                for (size_t k = 0; k < len; k++)
+                {
+                    dst[out] = dst[out - off];
+                    out++;
+                }
+            }
+            else
+            {
+                if (in >= srclen) return -1;
+                dst[out++] = src[in++];
+            }
+        }
+    }
+    return 0;
+}
+
+// Quick startup self-test. Runs once per usm invocation, on a small
+// hand-rolled buffer that exercises both literal and back-reference
+// code paths. Any future regression in the encoder/decoder pair gets
+// caught before the user's data is touched.
+static int lzss_selftest(void)
+{
+    static const char test[] =
+        "Hello, World! Hello, World! Hello, World!"
+        "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    size_t test_len = sizeof(test) - 1;
+    unsigned char comp[256];
+    unsigned char deco[sizeof(test)];
+    size_t comp_len = 0;
+    if (lzss_compress((const unsigned char *)test, test_len,
+                      comp, sizeof(comp), &comp_len) != 0) return -1;
+    if (lzss_decompress(comp, comp_len, deco, test_len) != 0) return -2;
+    if (memcmp(test, deco, test_len) != 0) return -3;
+    return 0;
+}
+
+// Hidden debug command: round-trip a file through lzss_compress() and
+// lzss_decompress(), print the ratio, exit 0 on success / 1 on any
+// mismatch. Not advertised in --help; used by tests/ to validate the
+// LZSS implementation before -z compression is wired into the cart
+// build (Story 3). Usage: usm -T <file>.
+static int lzss_roundtrip_file(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { printf("cannot open %s\n", path); return 1; }
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (sz < 0) { fclose(fp); printf("ftell failed on %s\n", path); return 1; }
+    unsigned char *orig = malloc((size_t)sz);
+    unsigned char *comp = malloc((size_t)sz * 2 + 64); // safe upper bound
+    unsigned char *deco = malloc((size_t)sz);
+    if (!orig || !comp || !deco) { printf("oom\n"); return 1; }
+    if (fread(orig, 1, (size_t)sz, fp) != (size_t)sz) { fclose(fp); printf("read failed\n"); return 1; }
+    fclose(fp);
+    size_t comp_len = 0;
+    if (lzss_compress(orig, (size_t)sz, comp, (size_t)sz * 2 + 64, &comp_len) != 0)
+    { printf("%s: compress failed\n", path); return 1; }
+    if (lzss_decompress(comp, comp_len, deco, (size_t)sz) != 0)
+    { printf("%s: decompress failed\n", path); return 1; }
+    if (memcmp(orig, deco, (size_t)sz) != 0)
+    { printf("%s: round-trip MISMATCH\n", path); return 1; }
+    double ratio = (double)comp_len / (double)sz * 100.0;
+    printf("%s: %ld -> %zu bytes (%.1f%%) OK\n", path, sz, comp_len, ratio);
+    free(orig); free(comp); free(deco);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int diagnostic = 0;
@@ -149,6 +356,22 @@ int main(int argc, char **argv)
     int cart_current_offset = 0;
     int steem_cart = 0;
     int i;
+
+    // Always self-test the LZSS encoder + decoder on a hardcoded buffer
+    // before doing anything else. Catches regressions in the round-trip
+    // pair before the user's data is touched.
+    if (lzss_selftest() != 0)
+    {
+        printf("Internal error: LZSS self-test failed - exiting\n");
+        return -1;
+    }
+
+    // Hidden debug command for Story 2 testing: usm -T <file>
+    // Compresses the file in memory, decompresses, byte-compares.
+    if (argc == 3 && argv[1][0] == '-' && argv[1][1] == 'T' && argv[1][2] == '\0')
+    {
+        return lzss_roundtrip_file(argv[2]);
+    }
 
     if (argc < 3)
     {
@@ -176,6 +399,7 @@ int main(int argc, char **argv)
     uint32_t global_bss_hardcoded_address = 0x20000;
     uint32_t global_init_flag = 0;
     int classic_way_of_adding_programs_to_rom = 0;
+    int global_compress = 0;
     const uint32_t diagnostic_magic = 0xfa52235f;
     const uint32_t cart_magic = 0xABCDEF42;
 
@@ -189,7 +413,7 @@ int main(int argc, char **argv)
         {
             // Diagnostic cartridges are executed almost immediately after a system reset.
             // The OS uses a 680x0 JMP instruction to begin execution at address 0xFA0004
-            // after having set the Interrupt Priority Level (IPL) to 7, entering supervisor mode, 
+            // after having set the Interrupt Priority Level (IPL) to 7, entering supervisor mode,
             // and executing a RESET instruction to reset external hardware devices.
             diagnostic = 1;
         }
@@ -200,6 +424,13 @@ int main(int argc, char **argv)
         else if ((*argv)[1] == 'f')
         {
             global_init_flag = parse_init_parameter(&argv[0][2]);
+        }
+        else if ((*argv)[1] == 'z')
+        {
+            // -z = compress PRG payload(s) with LZSS-12-4. Auto-falls
+            // back to the uncompressed path per program if the compressed
+            // entry isn't smaller (see the per-file loop below).
+            global_compress = 1;
         }
         else if ((*argv)[1] == 'c')
         {
@@ -219,6 +450,22 @@ int main(int argc, char **argv)
         printf("Missing image filename - exiting\n");
         return -1;
     }
+    // -z is incompatible with -c (classic mode runs the program directly
+    // from ROM -- nowhere to decompress to) and with -d (diagnostic carts
+    // execute with no TOS context, but the decompressor needs Malloc).
+    // Reject as soon as both flags are visible globally; per-file overrides
+    // are re-checked inside the per-program loop below.
+    if (global_compress && classic_way_of_adding_programs_to_rom)
+    {
+        printf("-z (compress) and -c (classic mode) are incompatible - exiting\n");
+        return -1;
+    }
+    if (global_compress && diagnostic)
+    {
+        printf("-z (compress) and -d (diagnostic) are incompatible - exiting\n");
+        return -1;
+    }
+
     char *output_filename = *argv;
     argv++;
     argc--;
@@ -243,6 +490,9 @@ int main(int argc, char **argv)
     {
         uint32_t bss_current_file = 0;
         uint32_t init_current_file = global_init_flag;
+        int compress_current_file = global_compress;
+        size_t compressed_size = 0;
+        int use_compressed = 0;
 
         FILE *f = fopen(*argv, "rb");
         if (!f)
@@ -333,11 +583,31 @@ int main(int argc, char **argv)
                 argv++;
                 argc--;
             }
+            else if ((*argv)[1] == 'z')
+            {
+                // Per-file -z: enable compression for the just-read PRG only.
+                compress_current_file = 1;
+                argv++;
+                argc--;
+            }
             else
             {
                 printf("Invalid flag passed '%s' - exiting\n", *argv);
                 return -1;
             }
+        }
+
+        // Re-check the -z conflicts at per-file granularity, in case the
+        // per-file flag loop added -c or the cart is diagnostic.
+        if (compress_current_file && classic_way_of_adding_programs_to_rom)
+        {
+            printf("File %s: -z (compress) and -c (classic mode) are incompatible - exiting\n", s_filename);
+            return -1;
+        }
+        if (compress_current_file && diagnostic)
+        {
+            printf("File %s: -z (compress) and -d (diagnostic) are incompatible - exiting\n", s_filename);
+            return -1;
         }
 
         if (diagnostic && !classic_way_of_adding_programs_to_rom)
@@ -352,14 +622,62 @@ int main(int argc, char **argv)
 
         program_size = (BYTESWAP_LONG(ph->PRG_tsize) + BYTESWAP_LONG(ph->PRG_dsize) + 1) & 0xfffffffe; // align to 2 bytes
 
+        // Compression attempt: try LZSS-12-4 against the whole PRG file. Use
+        // the compressed entry only if it's actually smaller (decompressor
+        // stub + uncompressed_size LONG + compressed bytes vs. uncompressed
+        // stub + verbatim file). Already-packed PRGs typically grow under
+        // LZSS; the auto-fallback below ships those uncompressed.
+        if (compress_current_file && !classic_way_of_adding_programs_to_rom)
+        {
+            size_t comp_len = 0;
+            int rc = lzss_compress(prg_temp_buf, (size_t)file_size,
+                                   compress_temp_buf, sizeof(compress_temp_buf),
+                                   &comp_len);
+            uint32_t uncomp_footprint = (uint32_t)sizeof(prg_loader) + (uint32_t)file_size;
+            uint32_t comp_footprint   = (uint32_t)sizeof(prg_loader_compressed) + 4u + (uint32_t)comp_len;
+            if (rc == 0 && comp_footprint < uncomp_footprint)
+            {
+                compressed_size = comp_len;
+                use_compressed = 1;
+                printf("      + %s: compressed %ld -> %zu (%.1f%%)\n",
+                       s_filename, file_size, comp_len,
+                       (double)comp_len / (double)file_size * 100.0);
+            }
+            else
+            {
+                // Report the *entry* footprint ratio rather than the data
+                // ratio. For tiny PRGs the data may shrink (e.g. 88%) but
+                // the larger compressed stub still pushes the total entry
+                // over the uncompressed baseline; the entry ratio captures
+                // both stub overhead and data growth in one number.
+                double entry_ratio = rc == 0
+                    ? (double)comp_footprint / (double)uncomp_footprint * 100.0
+                    : 200.0;
+                printf("      + %s: no savings (%.0f%% entry), shipping uncompressed\n",
+                       s_filename, entry_ratio);
+            }
+        }
+
         // Per-program footprint in the cart: CA_HEADER (if not diagnostic) plus
-        // the bytes we actually write -- stub + verbatim PRG in default mode,
-        // TEXT+DATA only in classic mode. Drives both the overflow check and
-        // CA_NEXT so the chain actually points at the next CA_HEADER.
+        // the bytes we actually write -- TEXT+DATA only in classic mode;
+        // compressed stub + uncompressed_size LONG + compressed bytes in
+        // compressed default mode; uncompressed stub + verbatim PRG otherwise.
+        // Drives both the overflow check and CA_NEXT so the chain actually
+        // points at the next CA_HEADER.
         uint32_t entry_header_size = diagnostic ? 0 : (uint32_t)sizeof(CA_HEADER);
-        uint32_t payload_in_cart = classic_way_of_adding_programs_to_rom
-            ? program_size
-            : (uint32_t)sizeof(prg_loader) + (uint32_t)file_size;
+        uint32_t payload_in_cart;
+        if (classic_way_of_adding_programs_to_rom)
+        {
+            payload_in_cart = program_size;
+        }
+        else if (use_compressed)
+        {
+            payload_in_cart = (uint32_t)sizeof(prg_loader_compressed) + 4u + (uint32_t)compressed_size;
+        }
+        else
+        {
+            payload_in_cart = (uint32_t)sizeof(prg_loader) + (uint32_t)file_size;
+        }
         uint32_t entry_total_size = entry_header_size + payload_in_cart;
 
         if (entry_total_size > (uint32_t)(128 * 1024) - cart_current_offset)
@@ -379,7 +697,7 @@ int main(int argc, char **argv)
             // CA_INIT value as a callable address even when the high-byte
             // "init flags" are clear, and would auto-run our stub at boot
             // before GEMDOS is ready. The cart program remains launchable
-            // via CA_RUN from the C: desktop drive.
+            // via CA_RUN from the c: desktop drive.
             h->CA_INIT = init_current_file
                 ? BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER) + init_current_file)
                 : 0;
@@ -489,6 +807,24 @@ int main(int argc, char **argv)
             }
 
             cart_current_offset += program_size;
+        }
+        else if (use_compressed)
+        {
+            // Compressed default mode. Cart layout for this entry:
+            //   [ compressed stub ][ uncompressed_size LONG ][ compressed bytes ]
+            // The stub's `lea prg_payload(pc), a4` lands on the LONG, then
+            // advances into the compressed bytes after reading it. See
+            // prg_loader_compressed.s.
+            memcpy(&cart_start[cart_current_offset], prg_loader_compressed,
+                   sizeof(prg_loader_compressed));
+            cart_current_offset += sizeof(prg_loader_compressed);
+
+            uint32_t usz_be = BYTESWAP_LONG((uint32_t)file_size);
+            memcpy(&cart_start[cart_current_offset], &usz_be, 4);
+            cart_current_offset += 4;
+
+            memcpy(&cart_start[cart_current_offset], compress_temp_buf, compressed_size);
+            cart_current_offset += compressed_size;
         }
         else
         {
