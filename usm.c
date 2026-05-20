@@ -697,7 +697,7 @@ int main(int argc, char **argv)
             // CA_INIT value as a callable address even when the high-byte
             // "init flags" are clear, and would auto-run our stub at boot
             // before GEMDOS is ready. The cart program remains launchable
-            // via CA_RUN from the C: desktop drive.
+            // via CA_RUN from the c: desktop drive.
             h->CA_INIT = init_current_file
                 ? BYTESWAP_LONG(0xfa0000 + cart_current_offset + sizeof(CA_HEADER) + init_current_file)
                 : 0;

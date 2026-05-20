@@ -32,7 +32,7 @@ for src in $binaries; do
     printf '      + %s\n' "$src"
 done
 
-# No -f flag: cart appears on the cart's C: drive with all three
+# No -f flag: cart appears on the cart's c: drive with all three
 # entries listed; user launches each from the desktop.
 # shellcheck disable=SC2086
 ./usm "$out" $binaries

@@ -1,7 +1,7 @@
 ; prg_loader.s -- default-mode cart stub for USM-generated carts.
 ;
 ; Works both for auto-init (-f 3) at boot and for manual desktop launch
-; from the cart's C: drive in user mode. We allocate a fresh TPA from
+; from the cart's c: drive in user mode. We allocate a fresh TPA from
 ; the largest free chunk, build a complete Pexec-style basepage from
 ; scratch (ignoring anything TOS may have already provided), copy the
 ; appended PRG payload from ROM into the TPA, conditionally zero-fill
@@ -51,7 +51,7 @@ gemdos_malloc   EQU $48
 
 start:
                 ;-- Mshrink the TOS-provided basepage to $100 first. When
-                ;   we're launched via Pexec from the cart's C: drive,
+                ;   we're launched via Pexec from the cart's c: drive,
                 ;   TOS hands us essentially all of free memory as our
                 ;   TPA -- without this Mshrink, the Malloc(-1) below
                 ;   would see no free memory and return 0. The trap
@@ -94,7 +94,7 @@ start:
                 ;   loader does `move.w #$0300, sr` to drop to user
                 ;   mode at IPL 3, but that instruction is privileged
                 ;   and would trap when our cart is launched from the
-                ;   C: desktop in user mode via Pexec. Running in
+                ;   c: desktop in user mode via Pexec. Running in
                 ;   whatever mode the caller was in -- supervisor for
                 ;   auto-init, user for desktop launch -- works for both
                 ;   contexts. The Malloc traps above are not privileged.)

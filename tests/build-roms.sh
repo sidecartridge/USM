@@ -21,7 +21,7 @@ for src in tests/binaries/*.PRG tests/binaries/*.TOS; do
     rom="build/${name%.*}.ROM"
     printf '==> %-32s -> %s\n' "$src" "$rom"
     # No -f flag: CA_INIT high byte = 0, so TOS does NOT auto-run the
-    # cart at boot. The program shows up on the cart's C: drive and the
+    # cart at boot. The program shows up on the cart's c: drive and the
     # user launches it from the desktop (TOS Pexec's us into user mode;
     # the default-mode stub handles either context).
     if ! ./usm "$rom" "$src"; then
