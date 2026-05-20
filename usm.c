@@ -679,8 +679,14 @@ int main(int argc, char **argv)
             payload_in_cart = (uint32_t)sizeof(prg_loader) + (uint32_t)file_size;
         }
         uint32_t entry_total_size = entry_header_size + payload_in_cart;
+        // Round each entry's footprint up to a word boundary so the next
+        // CA_HEADER never lands on an odd address. TOS walks the cart's
+        // CA_NEXT chain at boot using long-word reads (TST.L (A0)), which
+        // raise a 68000 Address Error on an odd pointer and crash the
+        // machine with a line of bombs before GEM is up.
+        uint32_t entry_total_size_padded = (entry_total_size + 1u) & ~1u;
 
-        if (entry_total_size > (uint32_t)(128 * 1024) - cart_current_offset)
+        if (entry_total_size_padded > (uint32_t)(128 * 1024) - cart_current_offset)
         {
             printf("File %s will not fit in image - exiting\n", s_filename);
             return -1;
@@ -691,7 +697,7 @@ int main(int argc, char **argv)
         {
             CA_HEADER *h = (CA_HEADER *)&cart_start[cart_current_offset];
             last_ca_next = &h->CA_NEXT;
-            h->CA_NEXT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + entry_total_size);
+            h->CA_NEXT = BYTESWAP_LONG(0xfa0000 + cart_current_offset + entry_total_size_padded);
             // If no init flag was requested, leave CA_INIT entirely zero
             // (entire LONG = 0). Some TOS variants treat any non-zero
             // CA_INIT value as a callable address even when the high-byte
@@ -841,6 +847,13 @@ int main(int argc, char **argv)
 
             memcpy(&cart_start[cart_current_offset], prg_temp_buf, file_size);
             cart_current_offset += file_size;
+        }
+
+        // Word-align the next entry's start (see comment at entry_total_size_padded
+        // above). The skipped byte, if any, keeps its USM!-fill value; nothing reads it.
+        if (cart_current_offset & 1u)
+        {
+            cart_current_offset++;
         }
 
         number_of_programs_processed++;
