@@ -2,14 +2,9 @@
 /x64/*
 
 /.history/*
-/.claude/
 
 # Compiled binary.
 /usm
-
-# Private project planning (Epics / Stories / Tasks, design notes).
-# Never reference contents in commits, PRs, or source comments.
-/docs/
 
 # Generated test cart artifacts.
 /build/
@@ -20,6 +15,3 @@
 # Reference carts used for format analysis only; redistribution rights vary.
 /*.STC
 /*.stc
-
-# Experimental classic-mode build script — kept locally, not shipped.
-/tests/build-classic-roms.sh
